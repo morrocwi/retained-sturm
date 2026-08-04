@@ -1,0 +1,438 @@
+diff --git a/retained_spectral/competition/executor_audit.py b/retained_spectral/competition/executor_audit.py
+index 6c8679c..3169159 100644
+--- a/retained_spectral/competition/executor_audit.py
++++ b/retained_spectral/competition/executor_audit.py
+@@ -107,7 +107,7 @@ def executor_audit_case(
+ 
+     # native requested-only solve on the PREBUILT tridiagonal — only the solve is timed (same boundary)
+     native_samples, native_values = _hot_samples(
+-        lambda: native_eigvals_from_tridiagonal(diagonal, off_diagonal, k, problem.tolerance),
++        lambda: native_eigvals_from_tridiagonal(diagonal, off_diagonal, k, _matched_width(problem)),
+         repeats=repeats,
+     )
+     native_seconds = float(statistics.median(native_samples))
+@@ -122,6 +122,8 @@ def executor_audit_case(
+             lambda: sla.eigh_tridiagonal(
+                 diagonal, off_diagonal, select="i",
+                 select_range=(0, k - 1), eigvals_only=True, check_finite=False,
++                # T1: same-tolerance comparison (see scipy_pipeline.py).
++                tol=_matched_width(problem), lapack_driver="stebz",
+             ),
+         ),
+         (
+@@ -195,6 +197,17 @@ def executor_audit_case(
+     }
+ 
+ 
++def _matched_width(problem) -> float:
++    """The single declared bisection half-width both kernels are held to.
++
++    T1: this is the width the end-to-end engine actually uses
++    (``max(0.01*tolerance, 2e-12)``).  Previously the native kernel was handed
++    ``problem.tolerance`` while SciPy ran at the DSTEBZ machine-precision
++    default, so the kernel audit compared two different amounts of work.
++    """
++    return max(problem.tolerance * 0.01, 2.0e-12)
++
++
+ def run_executor_audit(
+     problems,
+     *,
+diff --git a/retained_spectral/competition/revision_harness.py b/retained_spectral/competition/revision_harness.py
+new file mode 100644
+index 0000000..ae2ef4d
+--- /dev/null
++++ b/retained_spectral/competition/revision_harness.py
+@@ -0,0 +1,196 @@
++"""Revision harness: paired timing, three end-to-end arms, one process launch.
++
++Differences from `competition.run`, all of them responses to referee points:
++
++* **Paired timing in Field A.**  The shipped kernel audit times the native
++  kernel in one loop and each competitor in a later loop, so any thermal or
++  frequency drift between the loops is charged systematically to one arm.  Here
++  the arms are interleaved within every repeat under a recorded seed, and the
++  bootstrap resamples *repeat indices*, not each arm independently, so the
++  interval respects the pairing.
++
++* **More samples.**  50 kernel repeats and 15 end-to-end repeats per launch,
++  against 11 and 21 before.
++
++* **Multiple process launches.**  This script does one launch and writes one
++  JSON; run it several times and aggregate.  Median-of-samples inside a single
++  process cannot see between-process variance in allocator state and code
++  placement.
++
++* **Three end-to-end arms.**  RMS, the shipped SciPy pipeline, and the SciPy
++  pipeline with retention ported in.  Without the third arm an end-to-end ratio
++  cannot separate "our kernel is faster" from "our comparator was not given the
++  idea under test".
++
++Usage::
++
++    PYTHONPATH=. python3 -m retained_spectral.competition.revision_harness \
++        --launch 1 --json /tmp/launch1.json
++"""
++
++from __future__ import annotations
++
++import os
++
++for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
++             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "NUMBA_NUM_THREADS"):
++    os.environ.setdefault(_var, "1")
++
++import argparse
++import json
++import platform
++import random
++import statistics
++import sys
++import time
++from pathlib import Path
++
++import numpy as np
++import scipy.linalg as sla
++
++from retained_spectral.engine import (
++    KERNEL_FIELD,
++    NATIVE_KERNEL_COMPILED,
++    native_eigvals_from_tridiagonal,
++    raw_benchmark_targets,
++    retained_raw_input_readout,
++    warm_native_kernel,
++)
++from retained_spectral.competition.executor_audit import retained_tridiagonal
++from retained_spectral.competition.scipy_pipeline import scipy_raw_input_readout
++from retained_spectral.competition.scipy_retained import scipy_retained_readout
++
++BOOTSTRAP_RESAMPLES = 4000
++
++
++def matched_width(problem) -> float:
++    return max(problem.tolerance * 0.01, 2.0e-12)
++
++
++def paired_ratio_ci(a, b, *, seed: int, resamples: int = BOOTSTRAP_RESAMPLES):
++    """95% CI for median(b)/median(a) resampling PAIRED repeat indices."""
++    a = np.asarray(a, dtype=float)
++    b = np.asarray(b, dtype=float)
++    point = float(np.median(b) / np.median(a))
++    n = len(a)
++    if n < 2:
++        return {"ratio_median": point, "ci95_low": point, "ci95_high": point,
++                "verdict": "insufficient-samples", "n_pairs": n}
++    rng = np.random.default_rng(seed)
++    boot = np.empty(resamples)
++    for i in range(resamples):
++        idx = rng.integers(0, n, size=n)
++        boot[i] = np.median(b[idx]) / np.median(a[idx])
++    lo, hi = float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))
++    verdict = "native_faster" if lo > 1.0 else ("competitor_faster" if hi < 1.0 else "tie")
++    return {"ratio_median": point, "ci95_low": lo, "ci95_high": hi,
++            "verdict": verdict, "n_pairs": n, "resamples": resamples}
++
++
++def interleaved(calls: dict, repeats: int, rng: random.Random) -> dict:
++    """Time every arm once per repeat, in a shuffled order each repeat."""
++    for fn in calls.values():          # warm / compile, untimed
++        fn()
++    samples = {name: [] for name in calls}
++    names = list(calls)
++    for _ in range(repeats):
++        rng.shuffle(names)
++        for name in names:
++            started = time.perf_counter()
++            calls[name]()
++            samples[name].append(time.perf_counter() - started)
++    return samples
++
++
++def kernel_field(target, *, intervals: int, repeats: int, seed: int) -> dict:
++    problem = target.problem
++    window = retained_raw_input_readout(problem).window
++    diagonal, off_diagonal, _ = retained_tridiagonal(problem, window, intervals)
++    k, w = problem.modes, matched_width(problem)
++    rng = random.Random(f"{seed}:kernel:{problem.name}")
++    samples = interleaved(
++        {
++            "native": lambda: native_eigvals_from_tridiagonal(diagonal, off_diagonal, k, w),
++            "dstebz": lambda: sla.eigh_tridiagonal(
++                diagonal, off_diagonal, select="i", select_range=(0, k - 1),
++                eigvals_only=True, check_finite=False, tol=w, lapack_driver="stebz"),
++        },
++        repeats, rng,
++    )
++    out = {"intervals": intervals, "matched_width": w,
++           "median_ms": {n: statistics.median(s) * 1e3 for n, s in samples.items()},
++           "samples_ms": {n: [x * 1e3 for x in s] for n, s in samples.items()}}
++    out["dstebz_over_native"] = paired_ratio_ci(samples["native"], samples["dstebz"], seed=seed)
++    return out
++
++
++def end_to_end_field(target, *, repeats: int, seed: int) -> dict:
++    problem = target.problem
++    reference = np.asarray(target.reference, dtype=float)
++    rng = random.Random(f"{seed}:e2e:{problem.name}")
++    arms = {
++        "rms": lambda: retained_raw_input_readout(problem),
++        "scipy_shipped": lambda: scipy_raw_input_readout(problem),
++        "scipy_retained": lambda: scipy_retained_readout(problem),
++    }
++    samples = interleaved(arms, repeats, rng)
++    results = {name: fn() for name, fn in arms.items()}
++    out = {
++        "median_ms": {n: statistics.median(s) * 1e3 for n, s in samples.items()},
++        "samples_ms": {n: [x * 1e3 for x in s] for n, s in samples.items()},
++        "solve_count": {n: int(r.solve_count) for n, r in results.items()},
++        "max_reference_abs_error": {
++            n: float(np.max(np.abs(np.asarray(r.values) - reference)))
++            for n, r in results.items()},
++        "status": {n: r.status for n, r in results.items()},
++        "tolerance": problem.tolerance,
++    }
++    out["shipped_over_rms"] = paired_ratio_ci(samples["rms"], samples["scipy_shipped"], seed=seed)
++    out["retained_over_rms"] = paired_ratio_ci(samples["rms"], samples["scipy_retained"], seed=seed)
++    out["shipped_over_retained"] = paired_ratio_ci(
++        samples["scipy_retained"], samples["scipy_shipped"], seed=seed)
++    return out
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser(description=__doc__)
++    ap.add_argument("--launch", type=int, required=True)
++    ap.add_argument("--kernel-repeats", type=int, default=50)
++    ap.add_argument("--e2e-repeats", type=int, default=15)
++    ap.add_argument("--intervals", type=int, default=768)
++    ap.add_argument("--seed", type=int, default=20260804)
++    ap.add_argument("--json", type=Path, required=True)
++    args = ap.parse_args()
++
++    warm_native_kernel()
++    seed = args.seed + args.launch
++    record = {
++        "schema": "idm.retained-spectral-revision.v1",
++        "launch": args.launch,
++        "seed": seed,
++        "design": "arms interleaved within each repeat; bootstrap resamples paired repeat indices",
++        "environment": {
++            "python": sys.version.split()[0],
++            "platform": platform.platform(),
++            "numpy": np.__version__,
++            "native_kernel_compiled": bool(NATIVE_KERNEL_COMPILED),
++            "kernel_field": KERNEL_FIELD,
++        },
++        "kernel": {},
++        "end_to_end": {},
++    }
++    for target in raw_benchmark_targets():
++        name = target.problem.name
++        record["kernel"][name] = kernel_field(
++            target, intervals=args.intervals, repeats=args.kernel_repeats, seed=seed)
++        record["end_to_end"][name] = end_to_end_field(
++            target, repeats=args.e2e_repeats, seed=seed)
++        print(f"launch {args.launch}  {name} done", flush=True)
++
++    args.json.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print("wrote", args.json)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/retained_spectral/competition/scipy_pipeline.py b/retained_spectral/competition/scipy_pipeline.py
+index 1e263fb..e9e4a58 100644
+--- a/retained_spectral/competition/scipy_pipeline.py
++++ b/retained_spectral/competition/scipy_pipeline.py
+@@ -191,6 +191,12 @@ def _richardson_mesh(
+             select_range=(0, problem.modes - 1),
+             eigvals_only=True,
+             check_finite=False,
++            # T1: the native kernel bisects to `problem.tolerance`; leaving this
++            # unset let DSTEBZ run at its machine-precision default, so the two
++            # sides were not solving to the same target. Matching the tolerance
++            # is required before any timing ratio is reportable.
++            tol=max(problem.tolerance * 0.01, 2.0e-12),
++            lapack_driver="stebz",
+         )
+         spectra.append(np.asarray(values))
+         solve_intervals.append(intervals)
+diff --git a/retained_spectral/competition/scipy_retained.py b/retained_spectral/competition/scipy_retained.py
+new file mode 100644
+index 0000000..b287502
+--- /dev/null
++++ b/retained_spectral/competition/scipy_retained.py
+@@ -0,0 +1,154 @@
++"""SciPy pipeline WITH retention — the missing arm of the end-to-end comparison.
++
++The shipped comparator (`scipy_pipeline.scipy_raw_input_readout`) rebuilds the
++whole Richardson ladder after the truncation window is widened.  RMS does not:
++it keeps the mesh correction already purchased on the narrow window and
++transports it across a single same-spacing solve on the wide window.
++
++If the comparator is not given the same option, an end-to-end timing ratio
++conflates two different things:
++
++  * how fast the native Sturm kernel is, and
++  * how much the *idea* of retention saves,
++
++and retention is not native-specific — it is ten lines in any pipeline.  This
++module ports retention into the SciPy pipeline and changes NOTHING else: same
++window search, same decay gate, same mesh ladder, same DSTEBZ calls at the same
++matched tolerance.  The difference between this arm and the shipped arm is the
++value of the idea; the difference between this arm and RMS is the value of the
++kernel.
++"""
++
++from __future__ import annotations
++
++import math
++import time
++
++import numpy as np
++from scipy.linalg import eigh_tridiagonal
++
++from retained_spectral.engine import RawSpectralProblem, RawSpectralResult
++from retained_spectral.competition.scipy_pipeline import (
++    _expanded_window,
++    _initial_window,
++    _scipy_tridiagonal,
++)
++
++
++def _matched_tol(problem: RawSpectralProblem) -> float:
++    return max(problem.tolerance * 0.01, 2.0e-12)
++
++
++def _solve(problem: RawSpectralProblem, window, intervals) -> np.ndarray:
++    diagonal, off_diagonal = _scipy_tridiagonal(problem, window, intervals)
++    return np.asarray(
++        eigh_tridiagonal(
++            diagonal,
++            off_diagonal,
++            select="i",
++            select_range=(0, problem.modes - 1),
++            eigvals_only=True,
++            check_finite=False,
++            tol=_matched_tol(problem),
++            lapack_driver="stebz",
++        )
++    )
++
++
++def _richardson_mesh_raw(problem, window, initial_intervals, max_intervals):
++    """As scipy_pipeline._richardson_mesh, but also returns the RAW finest spectrum.
++
++    The raw finest value is what retention needs: the window shift is a
++    difference of raw solves at identical spacing, so the extrapolated value
++    cannot be used for it.
++    """
++    spectra: list[np.ndarray] = []
++    intervals = max(64, initial_intervals)
++    solves = 0
++    while intervals <= max_intervals:
++        spectra.append(_solve(problem, window, intervals))
++        solves += 1
++        if len(spectra) >= 3:
++            coarse, fine, finest = spectra[-3:]
++            r_coarse = (4.0 * fine - coarse) / 3.0
++            r_fine = (4.0 * finest - fine) / 3.0
++            shift = np.abs(r_fine - r_coarse)
++            if float(np.max(shift)) <= 0.45 * problem.tolerance:
++                return r_fine, spectra[-1], shift, intervals, solves
++        intervals *= 2
++    if len(spectra) < 3:
++        raise RuntimeError("SciPy mesh cap did not admit three grids")
++    coarse, fine, finest = spectra[-3:]
++    r_coarse = (4.0 * fine - coarse) / 3.0
++    r_fine = (4.0 * finest - fine) / 3.0
++    return r_fine, spectra[-1], np.abs(r_fine - r_coarse), intervals // 2, solves
++
++
++def scipy_retained_readout(
++    problem: RawSpectralProblem,
++    *,
++    max_intervals: int = 1_048_576,
++    max_window_rounds: int = 10,
++) -> RawSpectralResult:
++    started = time.perf_counter()
++    scale, window = _initial_window(problem)
++    initial_intervals = max(
++        64,
++        2 ** math.ceil(
++            math.log2(max((window[1] - window[0]) / scale * 8.0, 64.0))
++        ),
++    )
++    total_solves = 0
++    values = None
++    mesh_shift = np.full(problem.modes, math.inf)
++    window_shift = np.full(problem.modes, math.inf)
++    finest = initial_intervals
++    reason = "window rounds exhausted"
++
++    for _round in range(max_window_rounds):
++        r_fine, raw_finest, mesh_shift, finest, solves = _richardson_mesh_raw(
++            problem, window, initial_intervals, max_intervals
++        )
++        total_solves += solves
++
++        expanded, tail_pass = _expanded_window(
++            problem, window, float(r_fine[-1]), scale
++        )
++
++        # --- RETENTION: one same-spacing solve on the wide window, and the
++        #     mesh correction already paid for is transported, not recomputed.
++        ratio = (expanded[1] - expanded[0]) / (window[1] - window[0])
++        expanded_intervals = max(64, int(round(finest * ratio)))
++        raw_expanded = _solve(problem, expanded, expanded_intervals)
++        total_solves += 1
++
++        window_shift = np.abs(raw_expanded - raw_finest)
++        values = r_fine + (raw_expanded - raw_finest)
++        diagnostic = mesh_shift + window_shift
++        window = expanded
++        finest = expanded_intervals
++
++        if tail_pass and float(np.max(diagnostic)) <= problem.tolerance:
++            reason = "retained: mesh, decay-boundary, and window gates passed"
++            break
++        initial_intervals = max(64, expanded_intervals // 8)
++
++    diagnostic = mesh_shift + window_shift
++    return RawSpectralResult(
++        values=np.asarray(values),
++        window=window,
++        finest_intervals=finest,
++        solve_count=total_solves,
++        mesh_shift=np.asarray(mesh_shift),
++        window_shift=np.asarray(window_shift),
++        diagnostic_bounds=np.asarray(diagnostic),
++        status="ACCEPT" if float(np.max(diagnostic)) <= problem.tolerance else "HOLD",
++        reason=reason,
++        elapsed_seconds=time.perf_counter() - started,
++        method="SciPy Richardson-stability pipeline WITH retention",
++        recurrence_updates=0,
++        peak_working_bytes=0,
++        reference_used_for_planning=False,
++        per_case_schedule=False,
++        tier="finite_diagnostic",
++    )
+diff --git a/retained_spectral/engine.py b/retained_spectral/engine.py
+index 9eb0bbc..3aa72d7 100644
+--- a/retained_spectral/engine.py
++++ b/retained_spectral/engine.py
+@@ -203,6 +203,14 @@ def potential_values(
+         return 0.5 * (wp**2 - wpp)
+     if problem.potential == "pure_quartic":
+         return p["coupling"] * x**4
++    if problem.potential == "abs_linear":
++        # NON-SMOOTH: V = g|x| has a kink at the origin.  The O(h^2) Richardson
++        # expansion assumed by both pipelines is not justified here.
++        return p["g"] * np.abs(x)
++    if problem.potential == "symmetric_double_well":
++        # CLUSTERED: quartic double well; the low levels form tunnelling
++        # doublets whose splitting falls exponentially with the barrier.
++        return p["lam"] * (x**2 - p["a2"]) ** 2
+     raise ValueError(f"unknown potential: {problem.potential}")
+ 
+ 
