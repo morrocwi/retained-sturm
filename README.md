@@ -231,10 +231,10 @@ mismatch and the missing-retention arm.
 ## Repo layout
 
 - [`paper/latest/`](paper/latest/) — symlink to the current paper revision.
-  Currently `v2` (`rms_harmonic.tex` only — not yet compiled to PDF on a
-  machine with the full LaTeX toolchain; see `docs/paper-map.md`). `v2` adds
-  a `sec:v2repair` subsection reporting the ARPACK fix and the corrected
-  `k>1` speed-claim scope on top of `v1`'s unchanged text; `v1`
+  Currently `v2` (`rms_harmonic.tex` + `rms_harmonic.pdf`, 17 pages,
+  compiled with `pdflatex`; metadata checked clean of local paths). `v2`
+  adds a `sec:v2repair` subsection reporting the ARPACK fix and the
+  corrected `k>1` speed-claim scope on top of `v1`'s unchanged text; `v1`
   (`rms_harmonic.tex` + `rms_harmonic.pdf`) remains available at
   [`paper/v1/`](paper/v1/) unchanged.
 - [`benchmarks/`](benchmarks/) — all benchmark scripts, their own `README.md` with per-script science status, and committed adversarial-suite result JSON under `benchmarks/results/`.
