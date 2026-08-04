@@ -19,10 +19,9 @@ underlying causes have since been addressed in `information-discrete-math`:
 2. The remaining `factorized_sextic_ground` speed parity — traced to `k=1`
    (see `sec:v2repair` in `paper/v2` and the closing section of this file);
    the strict speed gate is now scoped to `k>1` cases, with `k=1` reported
-   separately via a CPU instruction-count instrument. This is on PR #110
-   (commits `43c0ac4`/`3823245`), which has passed two rounds of independent
-   review but **has not yet been merged to `main`** — stated plainly so this
-   is not read as already part of the default branch.
+   separately via a CPU instruction-count instrument. PR #110 (commits
+   `43c0ac4`/`3823245`) passed two rounds of independent review, all CI
+   checks green, and **is now merged to `main`** (fast-forward, no conflicts).
 
 Under the corrected `k>1` scope, the overall verdict was **ACCEPT in five
 independent runs out of five** in local testing (previously 3/5 ACCEPT, 2/5

@@ -56,19 +56,15 @@ ed51c63be84c915ebdfc643a195322b0bf5feed5
 `main` branch has since advanced to
 
 ```
-a05841dd68153e73cd76ea6b1f1d98c54efac6a3
+439480df22c9fd31d9e0bb690eecd33ea4d2ee39
 ```
 
-(merge commit for PR #109, the ARPACK shift-invert fix — includes `72d5eec`
-and `acf4b51`). The `k>1` scope correction and the `k1_discrete_readout`
-instruction-count instrument are on branch `fix/scope-speed-gate-to-retained-k-gt-1`,
-tip commit
-
-```
-3823245720c6f2e31b2760c649b7f80b543768c1
-```
-
-**not yet merged to `main`** at the time of writing.
+This includes both PR #109 (the ARPACK shift-invert fix, merge commit
+`a05841d`, includes `72d5eec` and `acf4b51`) **and** PR #110 (the `k>1`
+scope correction and the `k1_discrete_readout` instruction-count instrument,
+fast-forward merged from `43c0ac4`/`3823245`) — both are now on `main`, all
+CI checks green (credibility audit, verify, coq, across ubuntu/macos ×
+py311/py312) before merge.
 
 (obtained by running `git -C information-discrete-math rev-parse HEAD` in
 this workspace at doc-writing time — 2026-08-04. Re-verify this value

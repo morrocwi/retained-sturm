@@ -1743,13 +1743,12 @@ launches, and the single-core replication host---are recorded under T7 and T8 of
 \emph{Added in v2:} the ARPACK shift-invert repair of \cref{sec:v2repair} is
 commit \texttt{72d5eec}, with the $10^{-9}$--$10^{-13}$ LAPACK-agreement
 figure and the ARPACK-timing-inflation caveat both from the independent
-re-verification of commit \texttt{acf4b51} (both merged to \texttt{main} as
-part of pull request \#109); the instruction-count instrument and the $k>1$
-scope correction are commits \texttt{43c0ac4} and \texttt{3823245} on pull
-request \#110, which at the time of this writing has passed two rounds of
-independent review but has \textbf{not yet been merged to \texttt{main}} ---
-stated here so this is not read as already part of the artefact's default
-branch.
+re-verification of commit \texttt{acf4b51} (pull request \#109). The
+instruction-count instrument and the $k>1$ scope correction are commits
+\texttt{43c0ac4} and \texttt{3823245} (pull request \#110), which passed two
+rounds of independent review with all continuous-integration checks green
+before merge. Both pull requests are merged to \texttt{main} at commit
+\texttt{439480d} at the time of this writing.
 
 \section*{Data and code availability}
 \addcontentsline{toc}{section}{Data and code availability}
