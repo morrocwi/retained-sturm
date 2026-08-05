@@ -54,8 +54,14 @@ comparison (`pip install pyslise`).
 
 ## Science status (read before citing any number below)
 
-- **Overall benchmark verdict is HOLD**, not ACCEPT — an ARPACK comparator
-  failed to converge on the Morse case. Nothing below overrides that.
+- **Overall benchmark verdict, under the corrected `k>1` scope, is ACCEPT
+  (5/5 independent local runs)** — v1's original all-seven-case verdict was
+  HOLD, caused by an ARPACK comparator failing to converge on the Morse
+  case and, once fixed, a genuine measurement-parity flip on
+  `factorized_sextic_ground`. Both are fixed and merged to `main`
+  (`information-discrete-math` PR #109 and PR #110); see
+  `docs/reproducibility.md` for merge commits. `k=1` cases are excluded from
+  the `k>1`-scoped speed gate, not overturned.
 - **Speed vs Matslise is MIXED**, not a win: 1.33–13x slower on smooth
   potentials (harmonic family, `|x|`, Pöschl–Teller), 8x faster only on
   `pure_quartic`. Do not state "faster" without that qualification.

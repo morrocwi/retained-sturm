@@ -2,12 +2,17 @@
 
 ## Science status (read before running or citing anything)
 
-- **Overall benchmark verdict is HOLD**, not ACCEPT — an ARPACK comparator
-  (`eigsh`) fails to converge on `morse_lambda5_all_bound` in Runs A–C
-  (fairness gate); Run D's fairness gate would pass with the ARPACK-as-primary
-  repair, but the speed gate then fails on its own merits because
-  `factorized_sextic_ground` is a measured **loss**. See `docs/paper-map.md`
-  row for `sec:fairness`.
+- **Overall benchmark verdict, under the corrected `k>1` scope, is ACCEPT
+  (5/5 independent local runs)** — v1's original all-seven-case verdict was
+  HOLD, caused by an ARPACK comparator (`eigsh`) failing to converge on
+  `morse_lambda5_all_bound` in Runs A–C (fairness gate) and, once that was
+  fixed, a genuine measurement-parity flip on `factorized_sextic_ground`
+  (speed gate). Both are now fixed and merged to `main`: PR #109
+  (ARPACK shift-invert fix) and PR #110 (`k>1` speed-gate scope correction)
+  — see "Engine dependency" below for merge commits. `k=1` cases
+  (`factorized_sextic_ground`, `pure_quartic_ground`) are excluded from the
+  `k>1`-scoped speed gate, not overturned; see `docs/paper-map.md` row for
+  `sec:fairness` and its closing section.
 - **Speed vs. MATSLISE is MIXED**, not a win: 1.33–13x slower on smooth
   potentials (harmonic family, `\|x\|`, Pöschl–Teller), 8x faster only on
   `pure_quartic`. Never state "faster" unqualified.

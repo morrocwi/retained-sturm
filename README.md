@@ -88,29 +88,39 @@ silently reworded into the abstract.
 
 ## STATUS (read this before the numbers below)
 
-**Overall benchmark verdict is HOLD, not ACCEPT.** The original cause — the
-SciPy/ARPACK comparator (`eigsh`) failing to converge on
-`morse_lambda5_all_bound`, which failed the fairness gate outright in Runs
-A–C — has been diagnosed and fixed: `information-discrete-math` PR #109
-(branch `fix/arpack-morse-shift-invert`, commit `72d5eec`, **open, not yet
-merged**) switches the ARPACK comparator to shift-invert mode with a
-Gershgorin-derived `sigma` computed from the operator alone (never from
-native's own eigenvalues, so the comparator stays independent). Verified:
-all seven declared cases now converge and cross-check, zero regression on
-the six that already worked `[finite_diagnostic]`.
+**Overall benchmark verdict, under the corrected `k>1` scope, is ACCEPT (5/5
+independent local runs)** — v1's original all-seven-case verdict was HOLD;
+both underlying causes have since been fixed and merged to `main` in
+`information-discrete-math`.
 
-That closes the fairness gate deterministically — it does **not** close the
-overall HOLD. The remaining and now sole cause is `factorized_sextic_ground`:
-its speed vs. `SciPy eigh_tridiagonal` sits at genuine measurement parity.
-Across 5 independent local runs (`audit_repeats=5`, the audit's default),
-overall verdict was 3/5 ACCEPT, 2/5 HOLD; raising to `audit_repeats=30`
-improves this to 4/5 ACCEPT but does not eliminate the flip
-`[finite_diagnostic]`. CPU instruction-count measurement (`perf stat`,
-repeated trials, median reported) shows why: native uses ~1.9–2.3x *more*
-instructions per call than SciPy on this exact case, yet is marginally
-faster in wall-clock — the edge is a microarchitectural
-execution-efficiency effect, not fewer operations, which is exactly why it
-sits at the noise floor. See `docs/paper-map.md`'s closing section for the
+1. The SciPy/ARPACK comparator (`eigsh`) failing to converge on
+   `morse_lambda5_all_bound`, which failed the fairness gate outright in Runs
+   A–C: `information-discrete-math` PR #109 (merge commit `a05841d`,
+   includes `72d5eec`/`acf4b51`) switches the ARPACK comparator to
+   shift-invert mode with a Gershgorin-derived `sigma` computed from the
+   operator alone (never from native's own eigenvalues, so the comparator
+   stays independent) — **merged to `main`**. Verified: all seven declared
+   cases now converge and cross-check, zero regression on the six that
+   already worked `[finite_diagnostic]`.
+2. `factorized_sextic_ground`'s speed-parity flip against `SciPy
+   eigh_tridiagonal`: `information-discrete-math` PR #110 (fast-forward
+   merged from `43c0ac4`/`3823245`, `main` now at `439480d`) scopes the
+   strict speed gate to `k>1` cases and reports `k=1` separately via a CPU
+   instruction-count instrument (`k1_discrete_readout`), passed two rounds
+   of independent review and all CI checks green — **merged to `main`**.
+
+Under this corrected `k>1` scope, overall verdict was **ACCEPT in 5/5
+independent local runs** (previously 3/5 ACCEPT, 2/5 HOLD under the original
+all-seven-case scope at `audit_repeats=5`) `[finite_diagnostic]`. This is a
+narrower claim than v1's original all-seven-case ACCEPT, not the same claim
+reasserted: `k=1` results (`factorized_sextic_ground`, `pure_quartic_ground`)
+are not overturned, they are excluded from a claim (cross-mode batching, the
+`12 → 7` solve-count reduction) they never supported. CPU instruction-count
+measurement (`perf stat`, repeated trials, median reported) still shows why
+`k=1` sits at the noise floor: native uses ~1.9–2.3x *more* instructions per
+call than SciPy on `factorized_sextic_ground`, yet is marginally faster in
+wall-clock — the edge is a microarchitectural execution-efficiency effect,
+not fewer operations. See `docs/paper-map.md`'s closing section for the
 fuller reading (**corrected once** — the mechanism at play is narrower than
 first stated): this architecture retains information two distinct ways —
 mesh-level bracket carry-over across refinement levels (runs at any `k`,
@@ -119,10 +129,8 @@ eigenvalue indices together (only this needs `k>1` to have a second index to
 batch with). `factorized_sextic_ground` and `pure_quartic_ground` both
 request `k=1`, so cross-mode batching has nothing to act on there — and the
 mesh-level retention that does still run does not visibly pay for itself
-(native uses more instructions, not fewer). Near-parity here is consistent
-with that reading, not an anomaly. No result in this repo overrides the
-HOLD, and no sentence here claims the `k=1` cases as evidence for
-cross-mode batching, in either direction.
+(native uses more instructions, not fewer). No sentence here claims the
+`k=1` cases as evidence for cross-mode batching, in either direction.
 
 **Known live bug — domain-truncation gate can silently miss a well.** On the
 symmetric double well $V=(x^2-9)^2$, $k=4$, the planner locates one well,
@@ -202,12 +210,14 @@ window witness that Matslise's does not.
 Against the (fairer, retention-ported) SciPy end-to-end comparator, the
 honest end-to-end geometric mean is 2.411x, not the original 3.279x
 `[finite_diagnostic]`, with one instance (`factorized_sextic_ground`) a
-measured loss (ratio 0.986) and a second a tie — which is exactly why the
-project's own speed verdict is HOLD, not ACCEPT. (This 0.986 is the paper's
-own **end-to-end** Run D number, a different measurement field from the
-**kernel-only** executor-audit CI discussed in the STATUS section above and
-in `docs/paper-map.md` — both point at `factorized_sextic_ground`, but they
-are not the same measurement; do not conflate them.) On the adversarial
+measured loss (ratio 0.986) and a second a tie — which is exactly why this
+end-to-end field's own speed verdict was HOLD in v1. (This 0.986 is the
+paper's own **end-to-end** Run D number, a different measurement field from
+the **kernel-only** executor-audit CI discussed in the STATUS section above
+and in `docs/paper-map.md` — both point at `factorized_sextic_ground`, but
+they are not the same measurement, and PR #110's `k>1` rescoping applies to
+the executor-audit CI verdict, not to this Run D end-to-end field; do not
+conflate them.) On the adversarial
 tridiagonal suite, the native kernel is measurably slower on glued Wilkinson
 matrices (ratio 0.478 at $k=64$, 0.326 at $k=168$) because DSTEBZ can
 block-split and the native kernel cannot `[finite_diagnostic]`.
